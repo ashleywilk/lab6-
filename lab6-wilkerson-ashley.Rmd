@@ -1,0 +1,604 @@
+---
+title: "Lab6-wilkerson-ashley"
+author: "Ashley Wilkerson"
+date: "2024-11-27"
+output: html_document
+---
+
+
+## Explaining MHV Change
+
+
+```{r }
+library(dplyr)
+library(knitr)
+library(pander)
+library(stargazer)
+library(scales)
+library(mclust)
+library( sp )          # work with shapefiles
+library( sf )          # work with shapefiles - simple features format
+
+library( tmap )        # theme maps
+
+library( ggplot2 )     # graphing 
+library( ggthemes )
+library(tidycensus)
+library(tigris)
+library(cartogram)
+set.seed(1234)
+
+
+
+s.type <- "text"
+```
+
+
+```{r}
+###################################
+#
+#     STARGAZER SETTINGS
+#
+###################################
+
+# DO NOT RUN CHUNK UNLESS KNITTING:
+# changes table formats to html
+# before rendering RMD docs
+
+s.type <- "html"
+```
+
+
+```{r}
+
+```
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r}
+panel.cor <- function(x, y, digits=2, prefix="", cex.cor)
+{
+    usr <- par("usr"); on.exit(par(usr))
+    par(usr = c(0, 1, 0, 1))
+    r <- abs(cor(x, y))
+    txt <- format(c(r, 0.123456789), digits=digits)[1]
+    txt <- paste(prefix, txt, sep="")
+    if(missing(cex.cor)) cex <- 0.8/strwidth(txt)
+    
+    test <- cor.test(x,y)
+    # borrowed from printCoefmat
+    Signif <- symnum(test$p.value, corr = FALSE, na = FALSE,
+                  cutpoints = c(0, 0.001, 0.01, 0.05, 0.1, 1),
+                  symbols = c("***", "**", "*", ".", " "))
+    
+    text(0.5, 0.5, txt, cex = 1.5 )
+    text(.7, .8, Signif, cex=cex, col=2)
+}
+
+panel.smooth <- function (x, y, col = par("col"), bg = NA, pch = par("pch"), 
+    cex = 0.5, col.smooth = "red", span = 2/3, iter = 3, ...) 
+{
+    points(x, y, pch = 19, col = gray(0.7,0.2), bg = bg, cex = cex)
+    ok <- is.finite(x) & is.finite(y)
+    if (any(ok)) 
+        lines(stats::lowess(x[ok], y[ok], f = span, iter = iter), 
+            col = col.smooth, lwd=2, ...)
+}
+
+# custom plot
+jplot <- function( x1, x2, lab1="", lab2="", draw.line=T, ... )
+{
+
+    plot( x1, x2,
+          pch=19, 
+          col=gray(0.6, alpha = 0.2), 
+          cex=0.5,  
+          bty = "n",
+          xlab=lab1, 
+          ylab=lab2, cex.lab=1.5,
+        ... )
+
+    if( draw.line==T ){ 
+        ok <- is.finite(x1) & is.finite(x2)
+        lines( lowess(x2[ok]~x1[ok]), col="red", lwd=3 ) }
+
+}
+
+```
+
+## Data 
+```{r}
+URL1 <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-2000.rds"
+d1 <- readRDS( gzcon( url( URL1 ) ) )
+
+URL2 <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-2010.rds"
+d2 <- readRDS( gzcon( url( URL2 ) ) )
+
+URLmd <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-META-DATA.rds"
+md <- readRDS( gzcon( url( URLmd ) ) )
+
+d1 <- select( d1, - year )
+d2 <- select( d2, - year )
+
+d <- merge( d1, d2, by="tractid" )
+d <- merge( d, md, by="tractid" )
+```
+
+## Filter Rural Districts
+
+```{r}
+table( d$urban )
+```
+
+```{r}
+d <- filter ( d, urban == 'urban')
+```
+
+## Create New Variables
+
+```{r}
+d <- select( d, tractid, 
+             mhmval00, mhmval12, 
+             hinc00, 
+             hu00, vac00, own00, rent00, h30old00,
+             empclf00, clf00, unemp00, prof00,  
+             dpov00, npov00,
+             ag25up00, hs00, col00, 
+             pop00.x, nhwht00, nhblk00, hisp00, asian00,
+             cbsa, cbsaname )
+
+ 
+d <- 
+  d %>%
+  mutate( # percent white in 2000
+          p.white = 100 * nhwht00 / pop00.x,
+          # percent black in 2000
+          p.black = 100 * nhblk00 / pop00.x,
+          # percent hispanic in 2000
+          p.hisp = 100 * hisp00 / pop00.x, 
+          # percent asian in 2000
+          p.asian = 100 * asian00 / pop00.x,
+          # percent high school grads by age 25 in 2000 
+          p.hs = 100 * (hs00+col00) / ag25up00,
+          # percent pop with college degree in 2000
+          p.col = 100 * col00 / ag25up00,
+          # percent employed in professional fields in 2000
+          p.prof = 100 * prof00 / empclf00,
+          # percent unemployment  in 2000
+          p.unemp = 100 * unemp00 / clf00,
+          # percent of housing lots in tract that are vacant in 2000
+          p.vacant = 100 * vac00 / hu00,
+          # dollar change in median home value 2000 to 2010 
+          pov.rate = 100 * npov00 / dpov00 )
+
+
+# adjust 2000 home values for inflation 
+mhv.00 <- d$mhmval00 * 1.28855  
+mhv.10 <- d$mhmval12
+
+# change in MHV in dollars
+mhv.change <- mhv.10 - mhv.00
+
+
+# drop low 2000 median home values
+# to avoid unrealistic growth rates.
+#
+# tracts with homes that cost less than
+# $1,000 are outliers
+mhv.00[ mhv.00 < 1000 ] <- NA
+
+# change in MHV in percent
+mhv.growth <- 100 * ( mhv.change / mhv.00 )
+
+d$mhv.00 <- mhv.00
+d$mhv.10 <- mhv.10
+d$mhv.change <- mhv.change
+d$mhv.growth <- mhv.growth
+```
+
+## MEDIAN HOME VALUE
+```{r}
+hist( mhv.00, breaks=200, xlim=c(0,500000), 
+      col="gray20", border="white",
+      axes=F, 
+      xlab="MHV (median = $138k)",
+      ylab="",
+      main="Median Home Value in 2000 (2010 US dollars)" )
+
+axis( side=1, at=seq(0,500000,100000), 
+      labels=c("$0","$100k","$200k","$300k","$400k","$500k") )
+
+abline( v=median( mhv.00, na.rm=T ), col="orange", lwd=3 )
+```
+
+## DESCRIPTIVES
+
+```{r}
+df <- data.frame( MedianHomeValue2000=mhv.00, 
+                  MedianHomeValue2010=mhv.10, 
+                  MHV.Change.00.to.10=mhv.change,
+                  MHV.Growth.00.to.12=mhv.growth )
+s.type <- "text"
+stargazer( df, 
+           type=s.type, 
+           digits=0, 
+           summary.stat = c("min", "p25","median","mean","p75","max") )
+```
+
+## CHANGE IN MHV 2000-2010
+```{r}
+hist( mhv.change/1000, breaks=500, 
+      xlim=c(-100,500), yaxt="n", xaxt="n",
+      xlab="Thousand of US Dollars (adjusted to 2010)", cex.lab=1.5,
+      ylab="", main="Change in Median Home Value 2000 to 2010",
+      col="gray20", border="white" )
+
+axis( side=1, at=seq( from=-100, to=500, by=100 ), 
+      labels=paste0( "$", seq( from=-100, to=500, by=100 ), "k" ) )
+        
+mean.x <- mean( mhv.change/1000, na.rm=T )
+abline( v=mean.x, col="darkorange", lwd=2, lty=2 )
+text( x=200, y=1500, 
+      labels=paste0( "Mean = ", dollar( round(1000*mean.x,0)) ), 
+      col="darkorange", cex=1.8, pos=3 )
+
+median.x <- median( mhv.change/1000, na.rm=T )
+abline( v=median.x, col="dodgerblue", lwd=2, lty=2 )
+text( x=200, y=2000, 
+      labels=paste0( "Median = ", dollar( round(1000*median.x,0)) ), 
+      col="dodgerblue", cex=1.8, pos=3 )
+```
+
+## PERCENT CHANGE IN MHV 2000 TO 2010 
+
+```{r}
+hg <-
+hist( mhv.growth, breaks=5000, 
+      xlim=c(-100,200), yaxt="n", xaxt="n",
+      xlab="", cex.main=1.5,
+      ylab="", main="Growth in Home Value by Census Tract 2000 to 2010",
+      col="gray40", border="white" )
+
+axis( side=1, at=seq( from=-100, to=200, by=50 ), 
+      labels=paste0( seq( from=-100, to=200, by=50 ), "%" ) )
+
+ymax <- max( hg$count )
+        
+mean.x <- mean( mhv.growth, na.rm=T )
+abline( v=mean.x, col="darkorange", lwd=2, lty=2 )
+text( x=100, y=(0.5*ymax), 
+      labels=paste0( "Mean = ", round(mean.x,0), "%"), 
+      col="darkorange", cex=1.8, pos=4 )
+
+median.x <- median( mhv.growth, na.rm=T )
+abline( v=median.x, col="dodgerblue", lwd=2, lty=2 )
+text( x=100, y=(0.6*ymax), 
+      labels=paste0( "Median = ", round(median.x,0), "%"), 
+      col="dodgerblue", cex=1.8, pos=4 )
+```
+
+## METRO LEVEL STATISTICS
+
+```{r}
+# average growth in median home value for the city
+d <- 
+  d %>%
+  group_by( cbsaname ) %>%
+  mutate( metro.mhv.change = median( mhv.change, na.rm=T ),
+             metro.mhv.growth = 100 * median( mhv.growth, na.rm=T ) ) %>%
+  ungroup()
+```
+
+##  VARIABLE SELECTION
+
+```{r}
+colnames(d)
+```
+
+> Percentage of black residents, Hypotheses: in areas with a higher percentage of black residents in literature median home values seen to go down..
+
+```{r}
+par( mfrow=c(1,2) )
+
+hist( d$p.black, breaks=50, col="gray20", border="white",
+      yaxt="n", xlab="", ylab="", main="Percentage Black Residents")
+hist( log(d$p.black+1), breaks=50, col="gray20", border="white",
+      yaxt="n", xlab="", ylab="", main="Percentage Black Residents (logged)")
+```
+
+>Bachelor Degree in 2000’s ###Hypothesis: Higher levels of education in 2000 will predict a larger increase in home value between 2000 and 2010.
+
+```{r}
+hist( d$col00, breaks=50, col="gray20", border="white",
+      yaxt="n", xlab="", ylab="", main="College Degree")
+```
+
+```{r}
+hist( log(d$col00+1), breaks=50, col="gray20", border="white",
+      yaxt="n", xlab="", ylab="", main="College Degree (logged)")
+```
+
+>Percent Unemployed ###Hypothesis: Higher levels of unemployment will predict a larger gap in median home prices between 2000 and 2010.
+
+```{r}
+hist( d$p.unemp, breaks=50, col="gray20", border="white",
+      yaxt="n", xlab="", ylab="", main="Percent Unemployed")
+```
+
+```{r}
+hist( log(d$p.unemp+1), breaks=50, col="gray20", border="white",
+      yaxt="n", xlab="", ylab="", main="Percent Unemployed (logged)")
+```
+
+```{r}
+log.p.unemp <- log10( d$p.unemp + 1 )
+log.p.black <- log10( d$p.black + 1 )
+log.col00 <- log10( d$col00 + 1)
+these <- sample( 1:length(log.p.unemp), 5000 )
+
+par( mfrow=c(1,2) )
+jplot( d$p.unemp[these], d$p.black[these], 
+       lab1="Percentage Unemployed", lab2="Percentage Black Residents",
+       main="Raw Measures" )
+jplot( log.p.unemp[these], log.p.black[these], 
+       lab1="Percentage Unemployed", lab2="Percentage Black Residents",
+       main="Log Transformed" )
+```
+
+```{r}
+cor( d$p.unemp, d$p.black, use="pairwise.complete" )
+```
+
+```{r}
+cor( log.p.unemp, log.p.black, use="pairwise.complete" )
+```
+
+```{r}
+# create subset to visualize in correlation matrix 
+d2 <- select( d, mhv.growth, p.black,  p.prof,  pov.rate, p.unemp )
+
+# reduce data density for visualization
+set.seed( 1234 )
+d3 <- sample_n( d2, 10000 ) %>% na.omit()
+
+# correlation plots
+
+pairs( d3, upper.panel=panel.cor, lower.panel=panel.smooth)
+```
+
+```{r}
+jplot( d3$p.black, d3$mhv.growth, ylim=c(-50,100),
+       lab1="Vacancy Rates", lab2="MHV Growth" )
+```
+
+```{r}
+reg.data <- d
+
+reg.data$mhv.growth[ reg.data$mhv.growth > 200 ] <- NA
+reg.data$p.unemp <- log10( reg.data$p.unemp + 1 )
+reg.data$p.black <- log10( reg.data$p.black + 1 )
+reg.data$col00 <- log10( reg.data$col00 + 1 )
+
+m1 <- lm( mhv.growth ~ p.black, data=reg.data )
+m2 <- lm( mhv.growth ~  p.unemp, data=reg.data )
+m3 <- lm( mhv.growth ~  col00 + p.unemp, data=reg.data )
+
+
+stargazer( m1, m2, m3, 
+           type=s.type, digits=2,
+           omit.stat = c("rsq","f") )
+```
+
+```{r}
+# Calculate changes
+d$delta_p_black <- d$p.black - (d$nhblk00 / d$pop00.x)
+d$delta_p_unemp <- d$p.unemp - (d$unemp00 / d$clf00)
+d$delta_p_col <- d$p.col - (d$col00 / d$ag25up00)
+
+
+# Regression models with changes in covariates
+m1_change <- lm(mhv.growth ~ delta_p_black, data = d)
+m2_change <- lm(mhv.growth ~ delta_p_unemp, data = d)
+m3_change <- lm(mhv.growth ~ delta_p_col + delta_p_unemp, data = d)
+
+# Compare results using stargazer
+library(stargazer)
+
+stargazer(m1_change, m2_change, m3_change,
+          type = "text", digits = 2,
+          omit.stat = c("rsq", "f"),
+          title = "Regression Results Using Changes in Covariates")
+
+
+```
+
+
+```{r}
+census_api_key("0765edf09e6abf32a5af72fafd38dd94374a38c4")
+
+crosswalk <- read.csv( "https://raw.githubusercontent.com/DS4PS/cpp-529-master/master/data/cbsatocountycrosswalk.csv",  stringsAsFactors=F, colClasses="character" )
+```
+
+
+```{r}
+grep( "^NEW YORK", crosswalk$msaname, value=TRUE )
+```
+
+```{r}
+these.msp <- crosswalk$msaname == "NEW YORK"
+these.fips <- crosswalk$fipscounty[ these.msp ]
+these.fips <- na.omit( these.fips )
+
+head( these.fips ) %>% pander()
+```
+
+```{r}
+state.fips <- substr( these.fips, 1, 2 )
+county.fips <- substr( these.fips, 3, 5 )
+
+cbind( these.fips, state.fips, county.fips ) %>% pander()
+```
+
+```{r}
+valid_fips <- county.fips[state.fips == "36"]
+valid_fips <- valid_fips[valid_fips != "990"]
+
+msp.pop1 <- get_acs(
+  geography = "tract",
+  variables = "B01003_001",  # Total population
+  state = "36",              # New York State FIPS code
+  county = county.fips[state.fips == "36"],  # Filter counties within New York State
+  geometry = TRUE             
+) %>% 
+  select(GEOID, estimate) %>%  
+  rename(POP = estimate)       # Rename estimate column to POP
+```
+
+
+```{r}
+URL <- "https://github.com/DS4PS/cpp-529-master/raw/master/data/ltdb_std_2010_sample.rds"
+census.dat <- readRDS(gzcon(url(URL)))
+
+# Merge spatial data (msp.pop) with census data
+msp <- msp.pop1 %>%
+  left_join(census.dat, by = c("GEOID" = "tractid"))
+
+# Remove empty polygons
+msp <- msp[!st_is_empty(msp), ]
+```
+
+```{r}
+plot( msp.pop1 )
+```
+
+```{r}
+dd.URL <- "https://raw.githubusercontent.com/DS4PS/cpp-529-master/master/data/data-dictionary.csv"
+data.dictionary <- read.csv( dd.URL, stringsAsFactors=F ) 
+data.dictionary %>% pander()
+```
+
+
+```{r}
+# project map and remove empty tracts
+msp <- st_transform( msp, CRS("+init=epsg:3395"))
+```
+
+```{r}
+msp <- msp[ msp$POP != 0 & (! is.na( msp$POP )) , ]
+
+# convert census tract polygons to dorling cartogram
+# no idea why k=0.03 works, but it does - default is k=5
+msp$pop.w <- msp$POP / 9000 # max(msp.sp$POP)   # standardizes it to max of 1.5
+msp_dorling <- cartogram_dorling( x=msp, weight="pop.w", k=0.05 )
+plot( msp_dorling )
+```
+
+
+```{r}
+# Ensure interactive or static mode as needed
+tmap_mode("plot")  # or "view" for interactive maps
+```
+
+
+```{r}
+# Plot the Dorling cartogram with color based on "hinc12"
+tm_shape(msp_dorling) + 
+  tm_polygons(col = "hinc12", n = 7, style = "quantile", palette = "Spectral") +
+  tm_layout(title = "Dorling Cartogram", title.position = c("right", "top"))
+```
+
+```{r}
+bb <- st_bbox( c( xmin =  -10451823, xmax = -10324525, 
+                  ymax = 5639769, ymin = 5491665 ), 
+               crs = st_crs("+init=epsg:3395"))
+
+tm_shape(msp_dorling, bbox = bb) + 
+  tm_polygons(col = "hinc12", n = 10, style = "quantile", palette = "Spectral") +
+  tm_layout(title = "Dorling Cartogram", title.position = c("right", "top"))
+```
+
+```{r}
+keep.these <- c("pnhwht12", "pnhblk12", "phisp12", "pntv12", "pfb12", "polang12", 
+"phs12", "pcol12", "punemp12", "pflabf12", "pprof12", "pmanuf12", 
+"pvet12", "psemp12", "hinc12", "incpc12", "ppov12", "pown12", 
+"pvac12", "pmulti12", "mrent12", "mhmval12", "p30old12", "p10yrs12", 
+"p18und12", "p60up12", "p75up12", "pmar12", "pwds12", "pfhh12")
+
+d1 <- st_drop_geometry(msp_dorling)
+d2 <- select( d1, keep.these )
+```
+
+```{r}
+d3 <- apply( d2, 2, scale )
+head( d3[,1:6] ) %>% pander()
+```
+
+```{r}
+keep.these <- c("pnhwht12", "pnhblk12", "phisp12", "pntv12", "pfb12", "polang12", 
+"phs12", "pcol12", "punemp12", "pflabf12", "pprof12", "pmanuf12", 
+"pvet12", "psemp12", "hinc12", "incpc12", "ppov12", "pown12", 
+"pvac12", "pmulti12", "mrent12", "mhmval12", "p30old12", "p10yrs12", 
+"p18und12", "p60up12", "p75up12", "pmar12", "pwds12", "pfhh12")
+
+d2 <- select( d1, keep.these )
+d3 <- apply( d2, 2, scale )
+
+head( d3[,1:6] ) %>% pander()
+```
+
+```{r}
+library(dplyr)
+library(sf)
+library(mclust)
+library(pander)
+
+# Define columns to keep
+keep.these <- c("pnhwht12", "pnhblk12", "phisp12", "pntv12", "pfb12", "polang12", 
+                "phs12", "pcol12", "punemp12", "pflabf12", "pprof12", "pmanuf12", 
+                "pvet12", "psemp12", "hinc12", "incpc12", "ppov12", "pown12", 
+                "pvac12", "pmulti12", "mrent12", "mhmval12", "p30old12", "p10yrs12", 
+                "p18und12", "p60up12", "p75up12", "pmar12", "pwds12", "pfhh12")
+
+
+d1 <- st_drop_geometry(msp_dorling)
+d2 <- select(d1, all_of(keep.these))
+
+rows_to_keep <- complete.cases(d2)
+
+d3 <- apply(d2[rows_to_keep, ], 2, scale)
+
+
+msp_dorling <- msp_dorling[rows_to_keep, ]
+
+set.seed(1234)
+fit <- Mclust(d3)
+msp_dorling$cluster <- as.factor(fit$classification)
+
+summary(fit)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
